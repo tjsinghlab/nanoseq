@@ -57,8 +57,7 @@ se <- bambu(
   ncore = ncore,
   verbose = TRUE,
   lowMemory = TRUE,
-  discovery = TRUE,
-  BPPARAM = SerialParam()
+  discovery = TRUE
 )
 
 writeBambuOutput(se, path = output_tag)
