@@ -86,9 +86,8 @@ se <- tryCatch({
     genome = genomeSequence,
     ncore = ncore,
     verbose = TRUE,
-    low_memory = TRUE,
-    DISCOVERY = FALSE,
-    QUANTIFICATION = TRUE
+    lowMemory = TRUE,
+    discovery = FALSE
   )
 }, error = function(e) {
   if (grepl("CompressedGRangesList", e$message)) {
