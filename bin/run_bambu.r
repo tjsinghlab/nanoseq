@@ -1,102 +1,76 @@
 #!/usr/bin/env Rscript
 
 ################################################
-################################################
 ## REQUIREMENTS                               ##
 ################################################
-################################################
-
 ## TRANSCRIPT ISOFORM DISCOVERY AND QUANTIFICATION
-    ## - ALIGNED READS IN BAM FILE FORMAT
-    ## - GENOME SEQUENCE
-    ## - ANNOTATION GTF FILE
-    ## - THE PACKAGE BELOW NEEDS TO BE AVAILABLE TO LOAD WHEN RUNNING R
-
-################################################
-################################################
-## LOAD LIBRARY                               ##
+## - ALIGNED READS IN BAM FILE FORMAT
+## - GENOME SEQUENCE (FASTA)
+## - ANNOTATION GTF FILE
+## - REQUIRED PACKAGES: bambu, Rsamtools
 ################################################
 
+library(bambu)
+library(Rsamtools)
 
-#!/usr/bin/env Rscript
+################################################
+## PARSE COMMAND-LINE PARAMETERS              ##
+################################################
+args <- commandArgs(trailingOnly = TRUE)
 
-# Load Libraries
-suppressPackageStartupMessages({
-  library(bambu)
-  library(GenomicRanges)
-  library(parallel)
-  library(dplyr)
-  library(Rsamtools)
-})
+# Extract arguments
+output_tag <- strsplit(grep('--tag', args, value = TRUE), split = '=')[[1]][[2]]
+ncore <- as.integer(strsplit(grep('--ncore', args, value = TRUE), split = '=')[[1]][[2]])
+genomeseq <- strsplit(grep('--fasta', args, value = TRUE), split = '=')[[1]][[2]]
+annot_gtf <- strsplit(grep('--annotation', args, value = TRUE), split = '=')[[1]][[2]]
+readlist <- args[5:length(args)]  # Remaining positional args are BAM file paths
 
-# Helper Function for Safe Overlap Fix
-split_intersection <- function(grl, geneRanges, ov, ncores = 20) {
-  multiHits <- which(queryHits(ov) %in% which(countQueryHits(ov) > 1))
-  if (length(multiHits) == 0) return(NULL)
-  
-  dfs = parallel::mclapply(split(multiHits, cut(seq_along(multiHits), 100)),
-    function(multiHit) {
-      rangeIntersect = GenomicRanges::intersect(
-        grl[queryHits(ov)[multiHit]],
-        geneRanges[subjectHits(ov)[multiHit]]
-      )
-      data.frame(
-        queryHits = queryHits(ov)[multiHit],
-        intersectWidth = sum(width(rangeIntersect)),
-        subjectHits = subjectHits(ov)[multiHit]
-      ) %>%
-        group_by(queryHits) %>%
-        summarise(
-          subjectHits = subjectHits[which.max(intersectWidth)],
-          intersectWidth = max(intersectWidth),
-          .groups = "drop"
-        )
-    },
-    mc.cores = ncores
-  )
-  do.call("rbind", dfs)
+# Index FASTA if not already indexed
+if (!file.exists(paste0(genomeseq, ".fai"))) {
+  message("Indexing FASTA...")
+  Rsamtools::indexFa(genomeseq)
 }
-
-# Parse Command-Line Arguments
-args <- commandArgs(trailingOnly=TRUE)
-
-output_tag     <- strsplit(grep('--tag*', args, value = TRUE), split = '=')[[1]][[2]]
-ncore          <- as.integer(strsplit(grep('--ncore*', args, value = TRUE), split = '=')[[1]][[2]])
-genomeseq      <- strsplit(grep('--fasta*', args, value = TRUE), split = '=')[[1]][[2]]
 genomeSequence <- Rsamtools::FaFile(genomeseq)
-Rsamtools::indexFa(genomeseq)
-annot_gtf      <- strsplit(grep('--annotation*', args, value = TRUE), split = '=')[[1]][[2]]
-readlist       <- args[5:length(args)]
 
 ################################################
-################################################
-## RUN BAMBU                                  ##
-################################################
+## LOAD ANNOTATION AND RUN BAMBU              ##
 ################################################
 
-# Run Annotations Preparation
+# Prepare annotations
 grlist <- prepareAnnotations(annot_gtf)
 
-# Run Bambu With Error Handling
-message("Running bambu with ", length(readlist), " input files...")
-se <- tryCatch({
-  bambu(
-    reads = readlist,
-    annotations = grlist,
-    genome = genomeSequence,
-    ncore = ncore,
-    verbose = TRUE,
-    lowMemory = TRUE,
-    discovery = FALSE
-  )
-}, error = function(e) {
-  if (grepl("CompressedGRangesList", e$message)) {
-    message("CompressedGRangesList error detected. Consider increasing memory or using a patched version of bambu.")
-    stop(e)
-  } else {
-    stop(e)
-  }
-})
+# SAFETY: Convert to SimpleList if GRangesList is compressed
+if (inherits(grlist, "CompressedGRangesList")) {
+  grlist <- as(grlist, "SimpleList")
+}
 
-# Write Output
-writeBambuOutput(se, output_tag)
+# Run bambu (with lowMemory flag for large input)
+se <- bambu(
+  reads = readlist,
+  annotations = grlist,
+  genome = genomeSequence,
+  ncore = ncore,
+  lowMemory = TRUE,
+  discovery = FALSE,
+  verbose = TRUE
+)
+
+################################################
+## FILTER LOW-CONFIDENCE TRANSCRIPTS          ##
+################################################
+
+read_classes <- rowRanges(se)
+
+# Filtering step: keep transcripts supported by at least 2 reads
+if ("nReads" %in% names(mcols(read_classes))) {
+  read_classes <- read_classes[mcols(read_classes)$nReads >= 2]
+  se <- se[names(read_classes), ]
+} else {
+  warning("No 'nReads' metadata found; skipping transcript filtering.")
+}
+
+################################################
+## WRITE OUTPUT                               ##
+################################################
+
+writeBambuOutput(se, path = output_tag)
